@@ -31,6 +31,21 @@ If you would rather not have Python at all, grab `scanverdict.exe` from the
 [releases page](https://github.com/Booyaka101/scanverdict/releases) and run it from a
 command prompt. One file, no installer.
 
+The exe is not code signed, so the first time you run it Windows shows a blue "Windows
+protected your PC" box with only a Don't run button. Click **More info** and then **Run
+anyway**. A signing certificate costs a few hundred a year and this is a free tool, so
+that box is not going away. What you can check instead is where the binary came from:
+every exe from v1.1.1 on is built by GitHub Actions and carries a build attestation tying
+it to the workflow run and the commit, which you can verify yourself with
+[gh](https://cli.github.com/):
+
+```
+gh attestation verify scanverdict.exe --repo Booyaka101/scanverdict
+```
+
+That is a stronger claim than a checksum I paste in by hand, because I never touch the
+binary.
+
 **You need ffmpeg and ffprobe on PATH.** All decoding happens through them. Windows builds
 are at [gyan.dev](https://www.gyan.dev/ffmpeg/builds/); on macOS `brew install ffmpeg`, on
 Debian and Ubuntu `apt install ffmpeg`. If they are missing, scanverdict says so and exits
