@@ -1,7 +1,10 @@
 # PROGRESS
 
-Version 1.1.0, built 2026-09-21. The brief is delivered. Nothing is stubbed and nothing is
-mocked in the shipped package.
+Version 1.1.0, released 2026-09-21. The brief is delivered. Nothing is stubbed and nothing
+is mocked in the shipped package.
+
+https://github.com/Booyaka101/scanverdict/releases/tag/v1.1.0
+https://pypi.org/project/scanverdict/1.1.0/
 
 ## State
 
@@ -65,16 +68,22 @@ Everything below was run, not assumed.
   blocks, which is the 4 blocks per frame the verify pass predicted.
 - `pyinstaller scanverdict.spec` produces a single-file `dist/scanverdict.exe` that runs
   `--version`, a real analysis and the missing-file path.
+- CI is green on the released commit `463db04` across Python 3.11, 3.12 and 3.13, plus the
+  packaging job that proves the sdist still carries `conftest.py` and that the README
+  reaches PKG-INFO. Checked through the commit check-runs API, not the run-level status.
+- `pip install scanverdict` from the live index into a fresh venv gives 1.1.0, classifies
+  all three sample fixtures and exits 1 on a missing file.
+- `scanverdict.exe` downloaded back from the release page is byte for byte the local build
+  (sha256 `2ffb96ce...`) and runs.
 
 ## Not done
 
-- Nothing has been published. No PyPI upload, no GitHub release, no account touched. The
-  owner ships it.
-- The git repo has no remote. `git remote add origin ...` before the first push.
-- CI has never run. The workflow is written against ubuntu-latest with apt ffmpeg and is
-  unexercised until the first push.
 - The exe is Windows-only, built on this machine. A macOS or Linux binary needs a runner on
-  that platform.
+  that platform, and the release workflow that would build one does not exist yet.
+- 1.0.0 was never published. It is in the history as commit `4dea8a9` and the changelog
+  keeps its entry, but the first public artefacts are 1.1.0.
+- Nobody has been told about it. No forum post, no Reddit thread, no VideoHelp reply. The
+  owner owns that wording.
 - Blend cycle detection has never seen a real capture. Every file it was tuned and checked
   against came out of ffmpeg's own synthetic sources. The thresholds separated blends from
   clean material by a wide margin there, but a noisy VHS transfer is a different animal and
@@ -82,12 +91,15 @@ Everything below was run, not assumed.
 
 ## Next steps, in order
 
-1. `git remote add origin https://github.com/Booyaka101/scanverdict && git push -u origin main`.
-2. Watch the first CI run. The fixture build is the slow part and the likeliest failure is a
-   missing ffmpeg filter in the runner's build, which would show as a `FixtureError`.
-3. Tag `v1.1.0`, attach `dist/scanverdict.exe` to the release. That link is the thing to
-   paste into a VideoHelp or doom9 thread.
-4. `twine upload dist/*` for the wheel and sdist.
+1. Post the release link where the audience is. VideoHelp and doom9 download exes from a
+   release page, not wheels from PyPI, so the exe link is the one that travels. r/ffmpeg
+   and r/DataHoarder are the other two places people argue about whether a rip is
+   interlaced.
+2. Get real captures through the blend cycle detector. It has only ever seen synthetic
+   material and that is the weakest claim in the README.
+3. Tighten segment boundaries below one window.
+4. A release workflow that builds the exe on a runner, so the binary is reproducible by
+   someone other than this machine.
 
 ## Features considered and not built
 
