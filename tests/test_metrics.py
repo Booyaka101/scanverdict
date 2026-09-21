@@ -6,6 +6,7 @@ import numpy as np
 import pytest
 
 from scanverdict.metrics import (
+    Blend,
     active_rows,
     blend_period,
     blend_solve,
@@ -180,3 +181,28 @@ def test_blend_period_ignores_clean_motion():
 
 def test_blend_period_needs_enough_frames():
     assert blend_period(blend_solve(_panning(40, rate=3.0))) is None
+
+
+def _blend(residual: np.ndarray) -> Blend:
+    n = len(residual)
+    return Blend(alpha=np.full(n, 0.5), residual=residual, blended=np.zeros(n, dtype=bool))
+
+
+def test_blend_period_ignores_a_residual_that_only_decays():
+    """1.1.0 read a drifting residual as a cycle the length of its shortest lag.
+
+    Ordinary footage correlates with itself at short lags and then decays, so a
+    test on correlation height alone always returns BLEND_PERIOD_MIN. Two real
+    files came back as 52.5 and 21 fps sources that way.
+    """
+    rng = np.random.default_rng(3)
+    drift = np.abs(np.cumsum(rng.standard_normal(200))) + 1.0
+    assert blend_period(_blend(drift)) is None
+
+
+def test_blend_period_reports_the_fundamental_not_a_harmonic():
+    """Source assembled at one rate and resampled carries a short cadence whose
+    harmonics land inside the range this looks at."""
+    n = 200
+    every_third = 1.0 + 1.2 * (np.arange(n) % 3 == 0)
+    assert blend_period(_blend(every_third)) is None

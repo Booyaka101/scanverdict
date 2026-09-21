@@ -1,5 +1,35 @@
 # Changelog
 
+## 1.1.1 - 2026-09-21
+
+### Fixed
+
+- Sharp progressive files are no longer called `field_blended`. The gate needed a file to
+  be short of clean frames, which a crisp animation source can be on combing floor alone,
+  and the blend rate half of it did no work: the genuinely blended fixture sits at 0.50
+  while the false positive sat at 0.90. It now also requires most frames to be outright
+  dirty, the same bar the interlaced branch uses. Found on a real 24 fps clip that was
+  being told to run `srestore`.
+- Blend cycle detection no longer reports a cycle that is not there. The autocorrelation
+  was normalised by the whole series energy while summing only the overlapping terms, so
+  the score fell off with the lag on its own and the highest one was always the shortest
+  lag searched. With a bare height threshold on top of that, any file with a rising or
+  drifting residual came back as a cycle of 8. Two real clips in a 66 file survey were
+  reporting source rates of 52.5 and 21 fps because of it. Each lag is now normalised by
+  the energy it actually overlaps, a peak has to stand clear of the trend around it rather
+  than just be high, and a peak at a multiple of a shorter strong cycle is rejected as its
+  harmonic. Measured over cached residuals from real footage: false positives fell from 32
+  to 16 in 167 windows while recall went from 3 to 4 in 19.
+
+### Changed
+
+- The README no longer claims the blend cycle detector has only seen synthetic material. It
+  has now seen real material and the limitations section says what it did there, including
+  an attempted fix that made things worse.
+- The Windows exe is built by GitHub Actions and carries a build attestation you can check
+  with `gh attestation verify`, rather than a checksum pasted in by hand. The SmartScreen
+  warning an unsigned binary triggers is now documented instead of left as a surprise.
+
 ## 1.1.0 - 2026-09-21
 
 ### Added

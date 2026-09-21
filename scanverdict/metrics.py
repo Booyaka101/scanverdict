@@ -191,12 +191,14 @@ def blend_solve(frames: np.ndarray) -> Blend:
 # A blended frame-rate conversion mixes each output frame from a different pair
 # of source frames, so the three-frame fit above matches well at some phases and
 # badly at others. The cycle length is the number of output frames the
-# conversion repeats over: 25 for 24 -> 25. Measured on four unrelated sources,
-# blended files ripple 0.26 to 0.32 and progressive ones 0.07 to 0.11.
+# conversion repeats over: 25 for 24 -> 25.
 BLEND_PERIOD_MIN, BLEND_PERIOD_MAX = 8, 40
 BLEND_RIPPLE_MIN = 0.20
-BLEND_PERIOD_AC = 0.50
+BLEND_PERIOD_AC = 0.35
+BLEND_PERIOD_PROMINENCE = 0.45
+BLEND_HARMONIC = 0.75   # of the candidate's own score
 _BLEND_PERIOD_SAMPLES = 90
+_BLEND_LAG_MIN = 3      # searched but never reported, so peaks at MIN have a slope either side
 
 
 @dataclass
@@ -204,10 +206,32 @@ class BlendPeriod:
     period: int      # output frames per cycle
     strength: float  # residual autocorrelation at that lag
     ripple: float    # residual coefficient of variation
+    prominence: float  # how far the peak stands above the trend around it
+
+
+def _autocorrelation(centred: np.ndarray, lags: np.ndarray) -> np.ndarray:
+    """Correlation at each lag, each normalised by the energy it actually overlaps.
+
+    Dividing every lag by the whole series energy instead makes the score fall
+    off with the lag on its own, which puts the maximum at the shortest lag
+    searched no matter what the content does.
+    """
+    out = np.empty(len(lags))
+    for i, k in enumerate(lags):
+        a, b = centred[: len(centred) - k], centred[k:]
+        scale = float(np.sqrt((a @ a) * (b @ b)))
+        out[i] = float(a @ b) / scale if scale > 0 else 0.0
+    return out
 
 
 def blend_period(blend: Blend) -> BlendPeriod | None:
-    """Find a repeating cycle in the blend residual, or None if there is none."""
+    """Find a repeating cycle in the blend residual, or None if there is none.
+
+    A cycle shows up as a peak standing clear of the trend around it. Its
+    height on its own says nothing: ordinary footage correlates with itself
+    strongly at short lags and the correlation then decays, so a test on height
+    alone reports whatever the shortest lag searched happens to be.
+    """
     r = blend.residual[np.isfinite(blend.residual)]
     if len(r) < _BLEND_PERIOD_SAMPLES:
         return None
@@ -218,17 +242,36 @@ def blend_period(blend: Blend) -> BlendPeriod | None:
     if ripple < BLEND_RIPPLE_MIN:
         return None
     centred = r - mean
-    energy = float(centred @ centred)
-    if energy <= 0:
+    if not centred.any():
         return None
-    lags = np.arange(BLEND_PERIOD_MIN, BLEND_PERIOD_MAX + 1)
-    scores = np.array([float(centred[: len(r) - k] @ centred[k:]) / energy for k in lags])
-    best = int(scores.argmax())
-    if scores[best] < BLEND_PERIOD_AC:
-        return None
-    return BlendPeriod(
-        period=int(lags[best]), strength=float(scores[best]), ripple=ripple
-    )
+    lags = np.arange(_BLEND_LAG_MIN, BLEND_PERIOD_MAX + BLEND_PERIOD_MAX // 2 + 1)
+    scores = _autocorrelation(centred, lags)
+
+    found: BlendPeriod | None = None
+    best_prominence = BLEND_PERIOD_PROMINENCE
+    for i, lag in enumerate(lags):
+        if not BLEND_PERIOD_MIN <= lag <= BLEND_PERIOD_MAX:
+            continue
+        if scores[i] < BLEND_PERIOD_AC or scores[i] <= scores[i - 1] or scores[i] < scores[i + 1]:
+            continue
+        span = max(2, int(lag) // 2)
+        left, right = scores[i - span:i], scores[i + 1:i + 1 + span]
+        if not len(left) or not len(right):
+            continue
+        prominence = float(scores[i] - max(left.min(), right.min()))
+        if prominence <= best_prominence:
+            continue
+        # A peak at a multiple of a shorter cycle is that shorter cycle. Source
+        # material assembled at one rate and resampled to another carries its
+        # own short cadence, and its harmonics land right in this range.
+        divisors = (d for d in range(_BLEND_LAG_MIN, int(lag)) if lag % d == 0)
+        if any(scores[d - _BLEND_LAG_MIN] >= BLEND_HARMONIC * scores[i] for d in divisors):
+            continue
+        found = BlendPeriod(
+            period=int(lag), strength=float(scores[i]), ripple=ripple, prominence=prominence
+        )
+        best_prominence = prominence
+    return found
 
 
 @dataclass
