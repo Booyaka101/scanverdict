@@ -1,0 +1,12 @@
+# setuptools' default sdist takes tests/test_*.py but not conftest.py, the
+# fixture builder or the changelog, which leaves an sdist whose suite cannot
+# even collect.
+include LICENSE
+include CHANGELOG.md
+include README.md
+include scanverdict.spec
+include packaging/exe_entry.py
+include tests/conftest.py
+include tests/make_fixtures.py
+recursive-include tests *.py
+prune tests/fixtures

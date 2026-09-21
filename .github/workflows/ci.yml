@@ -1,0 +1,59 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Install ffmpeg
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg
+      - run: ffmpeg -version | head -1
+      - run: pip install -e ".[dev]"
+      - run: ruff check .
+      - run: python -m pytest tests -q
+
+  package:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install build
+      - run: python -m build
+      # setuptools' default sdist leaves out conftest.py, which makes the shipped
+      # test suite unrunnable. MANIFEST.in puts it back; this proves it stayed.
+      - name: The sdist has to carry the test suite
+        run: |
+          tar tzf dist/*.tar.gz | grep -q 'tests/conftest.py'
+          tar tzf dist/*.tar.gz | grep -q 'tests/make_fixtures.py'
+      - name: The long description has to reach PKG-INFO
+        run: |
+          python - <<'PY'
+          import glob, tarfile
+          src = glob.glob("dist/*.tar.gz")[0]
+          with tarfile.open(src) as tar:
+              name = next(n for n in tar.getnames() if n.endswith("PKG-INFO"))
+              text = tar.extractfile(name).read().decode()
+          assert "# scanverdict" in text, "PKG-INFO has no README body"
+          print(f"{len(text)} characters of metadata including the long description")
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/

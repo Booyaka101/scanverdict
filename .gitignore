@@ -1,0 +1,16 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+
+# Real video, rebuilt on demand by tests/make_fixtures.py. Never committed.
+tests/fixtures/
+
+# What the recommended chain writes if you paste it as-is.
+out.mkv

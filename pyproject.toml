@@ -1,0 +1,69 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "scanverdict"
+version = "1.0.0"
+description = "Tell what scan type and cadence a video file really has, then prove the fix works"
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+requires-python = ">=3.11"
+authors = [{ name = "Booyaka101", email = "cbosch101@gmail.com" }]
+keywords = [
+    "video",
+    "interlace",
+    "deinterlace",
+    "telecine",
+    "ivtc",
+    "pulldown",
+    "cadence",
+    "ffmpeg",
+    "vapoursynth",
+    "transcoding",
+]
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "Environment :: Console",
+    "Intended Audience :: End Users/Desktop",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Multimedia :: Video",
+    "Topic :: Multimedia :: Video :: Conversion",
+]
+dependencies = ["numpy>=1.24"]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "ruff>=0.16", "build>=1.2", "pyinstaller>=6.10"]
+
+[project.urls]
+Homepage = "https://github.com/Booyaka101/scanverdict"
+Repository = "https://github.com/Booyaka101/scanverdict"
+Issues = "https://github.com/Booyaka101/scanverdict/issues"
+Changelog = "https://github.com/Booyaka101/scanverdict/blob/main/CHANGELOG.md"
+
+[project.scripts]
+scanverdict = "scanverdict.__main__:main"
+
+[tool.setuptools]
+packages = ["scanverdict"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+# Named rather than inherited: ruff's default set changes between minor releases.
+select = ["E", "F", "W", "I", "B", "UP", "C4", "RUF"]
+ignore = [
+    "RUF005",  # list concatenation reads better than unpacking here
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["E402"]  # conftest has to extend sys.path before importing the builders
