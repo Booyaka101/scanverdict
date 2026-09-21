@@ -76,8 +76,19 @@ Everything below was run, not assumed.
   reaches PKG-INFO. Checked through the commit check-runs API, not the run-level status.
 - `pip install scanverdict` from the live index into a fresh venv gives 1.1.0, classifies
   all three sample fixtures and exits 1 on a missing file.
-- `scanverdict.exe` downloaded back from the release page is byte for byte the local build
-  (sha256 `2ffb96ce...`) and runs.
+- `scanverdict.exe` for 1.1.0 downloaded back from the release page was byte for byte the
+  local build (sha256 `2ffb96ce...`) and ran. 1.1.1 is not built locally at all.
+- The 1.1.1 exe is built by `release.yml` on the tag. `gh attestation verify
+  scanverdict.exe --repo Booyaka101/scanverdict` on the downloaded asset exits 0, and the
+  statement names workflow `.github/workflows/release.yml`, ref `refs/tags/v1.1.1`, commit
+  `8ea72304e00d30eb6331cb145dfd2e227c4730fa`, subject sha256 `c361156b...`, which is the
+  sha256 of the file on disk and of the published `.sha256` sidecar. The downloaded exe
+  runs `--version`, classifies `telecine.mkv` with the verify line intact, and exits 1 on a
+  missing file.
+- CI green on `8ea7230` across 3.11, 3.12 and 3.13 plus packaging, checked through the
+  commit check-runs API before the tag was cut.
+- `pip install --no-cache-dir scanverdict==1.1.1` from the live index into a fresh venv
+  gives `scanverdict 1.1.1`.
 
 ## Not done
 
@@ -141,6 +152,51 @@ median filtered envelope to remove the motion, windows 9, 15, 25 and 41, at thre
 prominence thresholds. Strictly worse every way: recall 3/43 against 4/43, false positives
 41 to 57 out of 215 against 26.
 
+## The survey numbers
+
+156 files, no errors, `--json --no-verify`. The same 66 files were also run against 1.1.0
+before the fixes, so this is a real head to head rather than two different samples.
+
+| verdict | 1.1.0 | 1.1.1 |
+| --- | --- | --- |
+| undetermined | 37 | 40 |
+| progressive | 17 | 17 |
+| mixed | 5 | 5 |
+| field_blended | 7 | 4 |
+
+Exactly three files changed verdict, all `field_blended` to `undetermined`, and nothing
+else moved at all. The fix is surgical rather than a threshold nudge that drags everything
+with it. Both blend cycle false positives are gone (`rin_hq_final.mp4` was claiming a
+52.5 fps source, `rin_shift2.mp4` a 21 fps one) and no new ones appeared anywhere in the
+156.
+
+Across the full 156: undetermined 71%, progressive 13%, mixed 12%, field_blended 4%. That
+undetermined figure needs unpacking, because the headline number is misleading.
+
+- 38 of the files are one essay video's parallax stills, which are 10 second slideshows of
+  static images. They are 100% undetermined and that is the right answer, there is no
+  cadence in them to find.
+- Of the remaining 118, 108 are so short that the sampler can only get 1 to 3 windows out
+  of them instead of 12. Undetermined runs 76% on the 1-window files and 53% on the 2 to 3
+  window ones.
+- Only 5 files in the whole set are long enough to give the full 12 windows. Three come
+  back undetermined and two come back mixed, and all five are cuts of the same essay video.
+
+So the honest reading is that the rate is dominated by material that is too short or too
+static to classify, not by the classifier being unsure about real cadence. I had assumed
+earlier that undetermined was worse on short clips and better on long ones; measured over
+the whole set it is actually worse on the long ones, purely because the long ones here are
+the slideshows. Both readings were wrong in isolation and the window count is the variable
+that matters, not the duration.
+
+One thing left unresolved. `ep01_nomusic.mp4` reports `mixed` with four `field_blended`
+windows. Those windows are not the dead band case that was just fixed: they sit at
+`dirty=1.0`, `clean=0.0`, comb 17 to 29% of blocks, field matching moves the comb figure by
+under 0.3 percentage points, and 30 to 44% of frames solve as a blend. That is the exact
+signature the rule describes. The material is parallax-scrolled stills in a video editor,
+which really can produce inter-frame blending, so this may well be correct. There is no
+ground truth for it either way and it is recorded rather than declared.
+
 ## Next steps, in order
 
 1. Post the release link where the audience is. VideoHelp and doom9 download exes from a
@@ -150,8 +206,11 @@ prominence thresholds. Strictly worse every way: recall 3/43 against 4/43, false
 2. Get a real VHS capture or a PAL film transfer through the blend cycle detector. A long
    steady take is the case the feature was built for and the one case still untested.
 3. Tighten segment boundaries below one window.
-4. Cut the `undetermined` rate, or explain it. It runs high on short clips, which is partly
-   the sampler having too little to work with rather than the classifier being unsure.
+4. Make the short-file case say something useful. A file that only yields one or two
+   windows is undetermined most of the time, and the note explaining why is buried under
+   the window table. Either the sampler should overlap windows on short input to get more
+   samples out of the same frames, or the verdict line itself should say the file is too
+   short rather than leaving `undetermined` to carry that meaning.
 
 ## Features considered and not built
 

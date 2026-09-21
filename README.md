@@ -131,6 +131,13 @@ note: send_field doubles the frame rate to keep the motion you paid for. Use mod
 evidence either way, and recommending a filter there means a lossy re-encode of content
 that may have needed none.
 
+A short file gets it for a different reason, which is worth knowing before you read too
+much into it. The defaults want twelve windows of 120 frames, and a clip of a few seconds
+only has one or two to give. Over 156 real files, `undetermined` came back on 76% of the
+ones that yielded a single window and 53% of those that yielded two or three. The note
+under the verdict tells you how many windows the file actually held, and that number is the
+one to look at.
+
 ## Mixed files
 
 A file assembled from more than one source gets a per-window table instead of a single
