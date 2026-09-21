@@ -210,7 +210,12 @@ def classify_window(window: Window, probe_info: Probe) -> WindowVerdict:
             cadence=Cadence(period=period, phase=phase, hit_rate=hits, extra_rate=extra),
         )
 
-    if clean <= RARELY and blend_rate >= BLEND_RATE:
+    # dirty, not just clean: every frame of blended material holds two moments,
+    # so nearly all of them comb. Without this a sharp progressive file whose
+    # comb floor sits between COMB_CLEAN and COMB_DIRTY reads as blended, and
+    # the blend fit does not save it because slow motion solves as a blend of
+    # its neighbours whether or not anything was mixed.
+    if dirty >= MOSTLY and clean <= RARELY and blend_rate >= BLEND_RATE:
         return verdict(
             FIELD_BLENDED,
             f"no field match cleans these frames ({best.mean():.1%} of blocks still combed) "

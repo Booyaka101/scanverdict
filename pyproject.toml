@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "scanverdict"
-version = "1.1.0"
+version = "1.1.1"
 description = "Tell what scan type and cadence a video file really has, then prove the fix works"
 readme = "README.md"
 license = "MIT"

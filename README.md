@@ -260,9 +260,13 @@ really is an average of two others, which is what a bad standards conversion lea
 **Blend cycles.** The solve above only catches a frame mixed from its immediate neighbours.
 A 24 to 25 conversion mixes each output frame from a different pair, so most frames fail
 that test while the residual still rises and falls on a fixed period. Autocorrelating the
-residual over lags 8 to 40 finds that period: 25 for 24 to 25, 24 for 25 to 24. It has to
-clear a coefficient of variation of 0.20 and an autocorrelation of 0.50, and most of the
-progressive windows have to agree on the same period, before anything is reported.
+residual over lags 8 to 40 finds that period: 25 for 24 to 25, 24 for 25 to 24. Height at
+a lag means nothing on its own, because ordinary footage correlates with itself strongly
+at short lags and then decays, so a peak also has to stand 0.45 clear of the trend either
+side of it, and a peak at a multiple of a shorter strong cycle is dropped as a harmonic of
+it. On top of that the residual has to have a coefficient of variation of 0.20, the
+correlation has to reach 0.35, and most of the progressive windows have to agree on the
+same period, before anything is reported.
 
 Each window is classified on its own, then the windows are reconciled. Unanimous windows
 give high confidence, a split gives `mixed`, and the container flag is always printed next
@@ -270,14 +274,24 @@ to the pixel verdict with `agrees` or `disagrees` spelled out.
 
 ## Limitations
 
-**Blend cycle detection has only been tried on synthetic material.** A blended frame rate
-conversion is still `progressive` as a scan type, correctly, and the cycle is reported
-alongside it rather than as a seventh verdict. It was checked against eight files built
-from four unrelated ffmpeg sources, four blended and four clean. It found the cycle on the
-two blended sources that carry enough motion to classify at all, and fired on none of the
-clean ones, nor on any of the nine test fixtures other than the blended one. No real
-capture has been through it. Treat the cycle as a strong hint and confirm with your eyes
-before committing to an `srestore` rate.
+**Blend cycle detection works on steady motion and not on cut-up footage.** A blended frame
+rate conversion is still `progressive` as a scan type, correctly, and the cycle is reported
+alongside it rather than as a seventh verdict. On synthetic sources with continuous motion
+it is solid: every window of the blended fixture returns the exact period. On real footage
+it is not. I built a 175 second master out of clips scanverdict already calls progressive
+and ran six versions of it through, one untouched and five retimed or resampled by
+different routes. The windows that fired, fired on all six regardless of what had been done
+to the file, with the period wandering between 15 and 27. The detector is reading the
+content of those windows, not the cadence. The file level rule that most progressive
+windows must agree on one period is what stops that reaching you, and it held on all six.
+Flattening the motion envelope out of the residual with a median filter was the obvious fix
+and it made recall and false positives both worse, so it is not in there.
+
+The real material I had to test against is short AI generated clips with frequent cuts,
+which is the hardest case for anything that looks for a periodic signal. A long steady take
+off a PAL film transfer, which is what this feature is for, may behave much more like the
+synthetic case. I have not had one to try. Treat the cycle as a hint, and confirm with your
+eyes before committing to an `srestore` rate.
 
 **Sharp synthetic content raises the combing floor.** A progressive `testsrc2` frame scores
 about 4.6% of its blocks as combed with no interlacing anywhere near it, purely from
