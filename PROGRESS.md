@@ -48,6 +48,10 @@ Everything below was run, not assumed.
 - Blend cycle detection then checked against real material, which is what 1.1.1 is for. See
   the section below. The short version: it found two false positives that were reaching
   users and they are fixed.
+- `--full` throughput measured, which had never been done. 640x480 runs at 2.1x realtime
+  (40s fixture in 18.9s, 20s fixture in 9.2s). 1080p30 runs at 0.76x: a 542s file took 716s
+  across 136 back-to-back windows and completed, which also exercises the streaming
+  classifier at a window count nothing else has hit. The README now carries both figures.
 - Windows are classified as they are decoded, so memory is flat in the window count.
   Measured with `tracemalloc` on the spliced fixture at 40 windows: 68 MB peak streaming
   against 341 MB holding them all. Without this `--full` on a feature would have wanted
