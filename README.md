@@ -317,6 +317,14 @@ problem is not there.
 **10-bit and HDR sources work**, because everything is converted to gray8 before measuring.
 The extra bit depth carries no cadence information, but detail below 8 bits is not used.
 
+**A full scan is not fast.** `--full` decodes every frame of the file, so the cost scales
+with pixels rather than with how interesting the content is. Measured here on an i7 with
+ffmpeg 8.1: DVD resolution runs about 2.1x realtime, so a 22 minute episode takes around ten
+minutes, and 1080p30 runs at 0.76x, so a 9 minute file took 12 minutes and a feature would
+take longer than the feature. The default sampled scan only touches twelve windows and
+finishes in seconds at any resolution, so reach for `--full` when you actually suspect a
+splice, not as a matter of course.
+
 **One decoded window is held in memory at a time.** Frames are cropped to 512 columns but
 never scaled vertically, because field parity has to survive to the metrics. A window costs
 `frames_per_window x height x 512` bytes, so 120 frames of 4K is about 130 MB and the verify
