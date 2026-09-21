@@ -14,7 +14,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-from .metrics import window_metrics
+from .metrics import BlendPeriod, window_metrics
 from .probe import Probe
 from .sampler import Window
 
@@ -59,6 +59,22 @@ class Cadence:
 
 
 @dataclass
+class FrameBlend:
+    """A blended frame rate conversion: whole frames mixed, no fields involved."""
+
+    period: int
+    source_fps: float
+    strength: float
+
+    def as_dict(self) -> dict:
+        return {
+            "period": self.period,
+            "source_fps": round(self.source_fps, 3),
+            "strength": round(self.strength, 3),
+        }
+
+
+@dataclass
 class WindowVerdict:
     index: int
     start: float
@@ -67,6 +83,7 @@ class WindowVerdict:
     reason: str
     field_order: str | None = None
     cadence: Cadence | None = None
+    blend_period: BlendPeriod | None = None
     evidence: dict = field(default_factory=dict)
 
     def as_dict(self) -> dict:
@@ -97,6 +114,7 @@ class FileVerdict:
     notes: list[str]
     container_label: str
     container_agreement: str
+    frame_blend: FrameBlend | None = None
 
 
 def _find_cadence(duplicates: np.ndarray, period: int) -> tuple[int, float, float] | None:
@@ -123,7 +141,7 @@ def classify_window(window: Window, probe_info: Probe) -> WindowVerdict:
         return WindowVerdict(
             **base,
             label=UNDETERMINED,
-            reason=f"only {len(frames)} frames decoded here",
+            reason=f"only {len(frames)} frame{'' if len(frames) == 1 else 's'} decoded here",
         )
 
     m = window_metrics(frames)
@@ -150,6 +168,7 @@ def classify_window(window: Window, probe_info: Probe) -> WindowVerdict:
         "dirty_share": round(dirty, 3),
         "match_c_share": round(c_share, 3),
         "blend_rate": round(blend_rate, 3),
+        "blend_period": None if m["blend_period"] is None else m["blend_period"].period,
         "motion": round(motion, 3),
         "idet": idet.verdict,
         "match_string": match_string[:60],
@@ -159,8 +178,8 @@ def classify_window(window: Window, probe_info: Probe) -> WindowVerdict:
 
     def verdict(label, reason, field_order=None, cadence=None):
         return WindowVerdict(
-            **base, label=label, reason=reason,
-            field_order=field_order, cadence=cadence, evidence=evidence,
+            **base, label=label, reason=reason, field_order=field_order,
+            cadence=cadence, blend_period=m["blend_period"], evidence=evidence,
         )
 
     if motion < MOTION_MIN:
@@ -258,7 +277,8 @@ def reconcile(verdicts: list[WindowVerdict], probe_info: Probe) -> FileVerdict:
         elif share >= MOSTLY and len(counts) == 1:
             label, confidence = top, "medium"
             notes.append(
-                f"{total - n} window(s) were ambiguous rather than contradictory"
+                f"{total - n} of the windows could not be read either way, "
+                "rather than contradicting this"
             )
         elif share >= MOSTLY:
             label, confidence = top, "medium"
@@ -308,6 +328,14 @@ def reconcile(verdicts: list[WindowVerdict], probe_info: Probe) -> FileVerdict:
                 "for a disc assembled from several sources; fieldmatch relocks per scene"
             )
 
+    frame_blend = _frame_blend(verdicts, label, probe_info)
+    if frame_blend is not None:
+        notes.append(
+            f"the blend cycle repeats every {frame_blend.period} frames: about "
+            f"{frame_blend.source_fps:.1f} fps of source resampled to "
+            f"{probe_info.fps:.3g} by mixing whole frames, not by interlacing them"
+        )
+
     container_label = probe_info.container_verdict
     if container_label == "unknown":
         container_agreement = "no claim"
@@ -340,4 +368,62 @@ def reconcile(verdicts: list[WindowVerdict], probe_info: Probe) -> FileVerdict:
         notes=notes,
         container_label=container_label,
         container_agreement=container_agreement,
+        frame_blend=frame_blend,
     )
+
+
+def _frame_blend(
+    verdicts: list[WindowVerdict], label: str, probe_info: Probe
+) -> FrameBlend | None:
+    """A blend cycle only counts when most of the progressive windows see one.
+
+    Restricted to a progressive verdict: a file already called field_blended or
+    interlaced ripples for reasons this test cannot tell apart.
+    """
+    if label != PROGRESSIVE:
+        return None
+    windows = [v for v in verdicts if v.label == PROGRESSIVE]
+    found = [v.blend_period for v in windows if v.blend_period is not None]
+    if not windows or len(found) * 2 <= len(windows):
+        return None
+    period = Counter(b.period for b in found).most_common(1)[0][0]
+    return FrameBlend(
+        period=period,
+        # The conversions this band catches move between neighbouring rates, so
+        # the cycle covers one fewer source frame than output frames.
+        source_fps=probe_info.fps * (period - 1) / period,
+        strength=max(b.strength for b in found if b.period == period),
+    )
+
+
+@dataclass
+class Segment:
+    start: float
+    end: float
+    label: str
+    windows: int
+
+    def as_dict(self) -> dict:
+        return {
+            "start": round(self.start, 3),
+            "end": round(self.end, 3),
+            "label": self.label,
+            "windows": self.windows,
+        }
+
+
+def segments(verdict: FileVerdict, window_seconds: float, duration: float) -> list[Segment]:
+    """Runs of consecutive same-label windows, as time spans.
+
+    Only meaningful when the windows abut, which is what --full arranges. The
+    boundaries are therefore accurate to one window, not to the frame.
+    """
+    out: list[Segment] = []
+    for win in verdict.windows:
+        end = min(duration, win.start + window_seconds)
+        if out and out[-1].label == win.label:
+            out[-1].end = end
+            out[-1].windows += 1
+        else:
+            out.append(Segment(start=win.start, end=end, label=win.label, windows=1))
+    return out

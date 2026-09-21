@@ -7,6 +7,7 @@ import pytest
 
 from scanverdict.metrics import (
     active_rows,
+    blend_period,
     blend_solve,
     comb,
     field_match,
@@ -141,3 +142,41 @@ def test_short_windows_do_not_crash():
     short = moving(2)
     assert field_match(short).match_string == ""
     assert blend_solve(short).alpha.size == 0
+
+
+def _panning(count: int, rate: float) -> np.ndarray:
+    """A textured field panning at `rate` pixels per frame."""
+    rng = np.random.default_rng(7)
+    canvas = rng.integers(0, 255, size=(HEIGHT, WIDTH + 4 * count), dtype=np.uint8)
+    out = np.empty((count, HEIGHT, WIDTH), dtype=np.uint8)
+    for i in range(count):
+        x = i * rate
+        left, weight = int(x), x - int(x)
+        a = canvas[:, left : left + WIDTH].astype(np.float32)
+        b = canvas[:, left + 1 : left + 1 + WIDTH].astype(np.float32)
+        out[i] = (a * (1 - weight) + b * weight).round().astype(np.uint8)
+    return out
+
+
+def test_blend_period_finds_a_24_to_25_cycle():
+    """Resampling 24 source frames onto 25 output frames cycles every 25."""
+    source = _panning(200, rate=3.0)
+    picked = [i * 24 / 25 for i in range(150)]
+    frames = np.empty((150, HEIGHT, WIDTH), dtype=np.uint8)
+    for i, pos in enumerate(picked):
+        lo, weight = int(pos), pos - int(pos)
+        frames[i] = (
+            source[lo].astype(np.float32) * (1 - weight)
+            + source[lo + 1].astype(np.float32) * weight
+        ).round()
+    found = blend_period(blend_solve(frames))
+    assert found is not None
+    assert found.period == 25
+
+
+def test_blend_period_ignores_clean_motion():
+    assert blend_period(blend_solve(_panning(150, rate=3.0))) is None
+
+
+def test_blend_period_needs_enough_frames():
+    assert blend_period(blend_solve(_panning(40, rate=3.0))) is None

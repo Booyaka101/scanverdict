@@ -60,7 +60,7 @@ evidence
   combing          12.4% of the 1920 blocks in a frame, 40% of frames above threshold
   after matching   0.2% of blocks, 100% of frames clean
   field matches    59% keep the frame as shot (example: cppcccppcccppcccppcccppcccppcc)
-  blend solve      fires on 0% of frames
+  blend per frame  fires on 0% of frames
   motion           9.1 gray levels between frames (p90)
   idet             tff
 
@@ -104,11 +104,12 @@ note: send_field doubles the frame rate to keep the motion you paid for. Use mod
 | verdict | what it means | what you get |
 | --- | --- | --- |
 | `progressive` | whole frames, nothing to undo | no filter, and a note saying so |
+| `progressive` + blend cycle | whole frames, but the rate was changed by mixing them | the source rate, and an `srestore` snippet |
 | `interlaced_tff` / `interlaced_bff` | real interlace, fields are separate moments | `bwdif=mode=send_field`, double rate |
 | `telecine_3_2` | 24p film spread over 29.97 fps video | `fieldmatch,decimate`, back to 23.976 |
 | `pulldown_2_2` | every frame repeated once | `fieldmatch,decimate=cycle=2`, half rate |
 | `field_blended` | fields averaged together by a bad converter | no ffmpeg chain works, so you get an `srestore` snippet and an honest explanation |
-| `mixed` | different parts of the file are different things | a per-window table and the chain each segment needs |
+| `mixed` | different parts of the file are different things | the chain each part needs, and with `--full` a timed cut list |
 | `undetermined` | not enough motion to measure anything | nothing. It will not guess |
 
 `undetermined` is deliberate. A still frame, a black slate or a frozen capture carries no
@@ -117,28 +118,53 @@ that may have needed none.
 
 ## Mixed files
 
-A file assembled from more than one source gets a table instead of a single chain:
+A file assembled from more than one source gets a per-window table instead of a single
+chain, with the distinct labels and their chains underneath:
 
 ```
 verdict: mixed (confidence low)
-container says: progressive (disagrees)
 sampled: 8 windows of 120 frames, 4/8 windows agree
 
 per window
   #   start     verdict          why
   0        2.0  telecine_3_2     3:2 cadence: one duplicate every 5 frames (100% of slots), 100% of frames clean after field matching
-  1        6.6  telecine_3_2     3:2 cadence: one duplicate every 5 frames (100% of slots), 100% of frames clean after field matching
   ...
   4       20.3  interlaced_tff   100% of frames combed, no field match improves them, field order tff throughout
-  5       24.9  interlaced_tff   100% of frames combed, no field match improves them, field order tff throughout
   ...
 
 segments need different chains:
   interlaced_tff   bwdif=mode=send_field:parity=tff
   telecine_3_2     fieldmatch=order=tff,decimate
+
+note: run it again with --full to turn these windows into timed segments and a cut list
 ```
 
-Cut on those boundaries and treat each part separately, or do it in VapourSynth and splice.
+Sampled windows have gaps between them, so the point where one source ends and the next
+begins falls somewhere in a gap. `--full` tiles the windows back to back over the whole
+file instead, which makes consecutive same-verdict windows a real span and gets you a cut
+list:
+
+```
+$ scanverdict --full tests/fixtures/mixed.mkv
+
+verdict: mixed (confidence low)
+scanned: 10 windows of 120 frames, 5/10 windows agree
+
+the file is not one thing: its parts need different chains. Cut it on the boundaries listed here and treat each part separately, or do the whole thing in VapourSynth and splice.
+
+segments
+  start      end       verdict          chain
+       0.0      20.0  telecine_3_2     fieldmatch=order=tff,decimate
+      20.0      40.0  interlaced_tff   bwdif=mode=send_field:parity=tff
+  (boundaries land on a window edge, so they are good to 4.0s)
+
+cut there and run each part through its own chain:
+  ffmpeg -ss 0.000 -to 20.020 -i tests/fixtures/mixed.mkv -vf fieldmatch=order=tff,decimate -c:v libx264 out01.mkv
+  ffmpeg -ss 20.020 -to 40.020 -i tests/fixtures/mixed.mkv -vf bwdif=mode=send_field:parity=tff -c:v libx264 out02.mkv
+```
+
+The boundaries are only as precise as one window, which the output spells out. Drop
+`--frames-per-window` to tighten them and pay for it in windows decoded.
 
 ## Flags
 
@@ -149,6 +175,8 @@ scanverdict FILE [FILE ...]
 --csv                  one CSV row per file, header included
 --windows N            spans sampled across the file (default 12)
 --frames-per-window N  frames decoded per span (default 120)
+--full                 scan the whole file in back-to-back windows instead of sampling,
+                       which turns a mixed verdict into timed segments
 --no-verify            skip the proving pass
 --quiet                one line per file
 --version
@@ -157,6 +185,8 @@ scanverdict FILE [FILE ...]
 The defaults decode 1440 frames spread across the whole file. Raising `--windows` catches
 cadence changes in a long file at the cost of more seeking; lowering it is faster on a slow
 disk. A file too short to hold N non-overlapping windows gets fewer, and the output says so.
+`--full` ignores `--windows` and covers everything, at roughly `duration x fps` frames
+decoded, so it is the slow option you reach for once a file has already come back `mixed`.
 
 Several files at once, one line each:
 
@@ -179,12 +209,14 @@ telecine_3_2
 The object carries the verdict, the confidence, the container claim and whether it agrees,
 the full probe result, the sampling layout, the recommendation including both snippets, the
 per-window breakdown, and the verification numbers. Several files give an array of those.
+`frame_blend` is null unless a blend cycle was found. `segments` is empty unless you
+passed `--full` and the file turned out to have more than one span in it.
 
 `--csv` is the same information flattened for a spreadsheet, one row per file:
 
 ```
-file,verdict,confidence,field_order,cadence,phase,agreement,container,container_agreement,fps_in,fps_out,filters,comb_before,comb_after,reduction,frames_before,frames_after,verified
-tests/fixtures/telecine.mkv,telecine_3_2,high,tff,3:2,2,4/4 windows,progressive,disagrees,29.97,23.976,"fieldmatch=order=tff,decimate",238,4,-0.9831,360,288,yes
+file,verdict,confidence,field_order,cadence,phase,blend_period,agreement,container,container_agreement,fps_in,fps_out,filters,comb_before,comb_after,reduction,frames_before,frames_after,verified
+tests/fixtures/telecine.mkv,telecine_3_2,high,tff,3:2,2,,4/4 windows,progressive,disagrees,29.97,23.976,"fieldmatch=order=tff,decimate",238,4,-0.9831,360,288,yes
 ```
 
 ## How it decides
@@ -210,17 +242,27 @@ has exactly one near-zero entry in every five.
 of its neighbours. A residual under 4.0 with alpha between 0.2 and 0.8 means the frame
 really is an average of two others, which is what a bad standards conversion leaves behind.
 
+**Blend cycles.** The solve above only catches a frame mixed from its immediate neighbours.
+A 24 to 25 conversion mixes each output frame from a different pair, so most frames fail
+that test while the residual still rises and falls on a fixed period. Autocorrelating the
+residual over lags 8 to 40 finds that period: 25 for 24 to 25, 24 for 25 to 24. It has to
+clear a coefficient of variation of 0.20 and an autocorrelation of 0.50, and most of the
+progressive windows have to agree on the same period, before anything is reported.
+
 Each window is classified on its own, then the windows are reconciled. Unanimous windows
 give high confidence, a split gives `mixed`, and the container flag is always printed next
 to the pixel verdict with `agrees` or `disagrees` spelled out.
 
 ## Limitations
 
-**A 24 to 25 fps blend is reported as `progressive`.** When every frame is a blend of two
-sources, no frame and no neighbour pair is a clean reference, so the least-squares model has
-nothing to fit against. Field blending from a 50i or 60i source is detected correctly. This
-is a measured gap, not a guess: the test suite builds a 24 to 25 blended file and asserts
-the current behaviour so it stays visible.
+**Blend cycle detection has only been tried on synthetic material.** A blended frame rate
+conversion is still `progressive` as a scan type, correctly, and the cycle is reported
+alongside it rather than as a seventh verdict. It was checked against eight files built
+from four unrelated ffmpeg sources, four blended and four clean. It found the cycle on the
+two blended sources that carry enough motion to classify at all, and fired on none of the
+clean ones, nor on any of the nine test fixtures other than the blended one. No real
+capture has been through it. Treat the cycle as a strong hint and confirm with your eyes
+before committing to an `srestore` rate.
 
 **Sharp synthetic content raises the combing floor.** A progressive `testsrc2` frame scores
 about 4.6% of its blocks as combed with no interlacing anywhere near it, purely from
@@ -239,10 +281,12 @@ problem is not there.
 **10-bit and HDR sources work**, because everything is converted to gray8 before measuring.
 The extra bit depth carries no cadence information, but detail below 8 bits is not used.
 
-**Decoded windows are held in memory.** Frames are cropped to 512 columns but never
-scaled vertically, because field parity has to survive to the metrics. A window costs
+**One decoded window is held in memory at a time.** Frames are cropped to 512 columns but
+never scaled vertically, because field parity has to survive to the metrics. A window costs
 `frames_per_window x height x 512` bytes, so 120 frames of 4K is about 130 MB and the verify
-pass holds two of those at once. Lower `--frames-per-window` if that matters to you.
+pass holds two of those at once. Windows are classified as they are decoded and then
+dropped, so `--full` on a long file costs no more memory than the default does. Lower
+`--frames-per-window` if 130 MB matters to you.
 
 **No audio, no GUI, and it will not transcode your file.** The ffmpeg command is printed for
 you to run and check.

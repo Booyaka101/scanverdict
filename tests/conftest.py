@@ -26,6 +26,7 @@ def cli_args(**overrides) -> argparse.Namespace:
     settings = {
         "windows": TEST_WINDOWS,
         "frames_per_window": 120,
+        "full": False,
         "no_verify": True,
         "json": False,
         "csv": False,

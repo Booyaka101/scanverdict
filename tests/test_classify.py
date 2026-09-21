@@ -22,9 +22,8 @@ EXPECTED = {
     "pulldown22.mkv": PULLDOWN_2_2,
     "blended.mkv": FIELD_BLENDED,
     "flagged.mkv": PROGRESSIVE,
-    # 24 -> 25 blending leaves no frame and no neighbour pair that is a clean
-    # source, so the least-squares blend solve has nothing to fit and scanverdict
-    # reports what it can defend. The README carries this as a known limit.
+    # 24 -> 25 blending mixes whole frames, not fields, so the scan really is
+    # progressive. The blend itself is reported separately, see below.
     "blend2425.mkv": PROGRESSIVE,
 }
 
@@ -107,3 +106,25 @@ def test_a_frozen_file_refuses_to_guess(reports):
     assert report.verdict.container_agreement == "nothing to compare it to"
     assert not report.rec.filters
     assert all("no motion" in w.reason for w in report.verdict.windows)
+
+
+def test_a_blended_rate_conversion_is_named(reports):
+    """24 -> 25 by blending: progressive frames that are still mixtures."""
+    verdict = reports["blend2425.mkv"].verdict
+    blend = verdict.frame_blend
+    assert blend is not None
+    assert blend.period in (24, 25)
+    assert blend.source_fps == pytest.approx(24.0, abs=0.1)
+    assert any("blend cycle repeats every" in note for note in verdict.notes)
+
+
+def test_clean_progressive_reports_no_blend(reports):
+    for name in ("progressive.mkv", "flagged.mkv"):
+        assert reports[name].verdict.frame_blend is None
+
+
+def test_a_blended_file_is_sent_to_srestore(reports):
+    report = reports["blend2425.mkv"]
+    assert not report.rec.filters
+    assert "srestore" in report.rec.vapoursynth
+    assert "frate=24.000" in report.rec.vapoursynth

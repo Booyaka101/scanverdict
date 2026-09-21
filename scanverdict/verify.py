@@ -100,11 +100,11 @@ def _mean_comb(frames: np.ndarray, rows: tuple[int, int]) -> tuple[float, int]:
     return float(comb(active).mean()), total_blocks(active.shape[1], active.shape[2])
 
 
-def _why_no_chain(label: str) -> str:
-    if label == PROGRESSIVE:
-        return "the recommendation is to run no filter at all"
-    if label == FIELD_BLENDED:
+def _why_no_chain(verdict: FileVerdict) -> str:
+    if verdict.label == FIELD_BLENDED or verdict.frame_blend is not None:
         return "ffmpeg has no chain that undoes blending, so there is nothing to measure"
+    if verdict.label == PROGRESSIVE:
+        return "the recommendation is to run no filter at all"
     return "no chain was recommended"
 
 
@@ -115,7 +115,7 @@ def verify(
     rec: Recommendation,
 ) -> Verification:
     if rec.is_noop:
-        return Verification(ran=False, reason=f"nothing to verify -- {_why_no_chain(rec.label)}")
+        return Verification(ran=False, reason=f"nothing to verify -- {_why_no_chain(verdict)}")
 
     crop = crop_for(probe_info)
     span = layout.frames_per_window / probe_info.fps

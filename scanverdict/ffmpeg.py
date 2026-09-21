@@ -65,8 +65,11 @@ def gray_frames(argv: Sequence[str], height: int, width: int, timeout: float = 6
     stride = height * width
     count = len(proc.stdout) // stride
     if count == 0:
-        detail = _tail(argv, proc.stderr)
-        raise FFmpegFailed(f"decoded no frames.\n{detail}")
+        detail = proc.stderr.decode("utf-8", "replace").strip()
+        raise FFmpegFailed(
+            "ffmpeg decoded no frames here"
+            + (f": {detail.splitlines()[-1]}" if detail else "")
+        )
     buf = np.frombuffer(proc.stdout[: count * stride], dtype=np.uint8)
     return buf.reshape(count, height, width)
 

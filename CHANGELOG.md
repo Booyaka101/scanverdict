@@ -1,5 +1,35 @@
 # Changelog
 
+## 1.1.0 - 2026-09-21
+
+### Added
+
+- `--full` scans the whole file in back-to-back windows instead of sampling twelve spans
+  of it. Consecutive windows that agree become a timed segment, so a spliced file now
+  reports `0.0 - 20.0 telecine_3_2` and `20.0 - 40.0 interlaced_tff` plus a numbered
+  ffmpeg cut list, rather than a per-window table. Boundaries are good to one window.
+- Blended frame rate conversions are detected and named. A 24 to 25 conversion done by
+  mixing whole frames leaves a repeating cycle in the blend residual; scanverdict finds
+  the cycle length, reports the source rate it implies and points at `srestore` with the
+  right `frate`. This was a documented gap in 1.0.0.
+- JSON carries `frame_blend` and `segments`. CSV gains a `blend_period` column.
+
+### Fixed
+
+- A filename outside the Windows ANSI code page no longer ends the run with a
+  `UnicodeEncodeError` traceback. Output is UTF-8 on every platform.
+- Piping into a command that exits early, `| head` for instance, exits 141 quietly
+  instead of printing a `BrokenPipeError`.
+- A span that decodes no frames names the file and the timestamp it failed at.
+- `--frames-per-window` large enough to exhaust memory is refused with the figure it
+  would have needed, rather than raising `MemoryError` partway through.
+- Windows are classified as they are decoded rather than all decoded first, so memory
+  stays flat in the number of windows. Measured on the spliced fixture at 40 windows:
+  68 MB peak instead of 341 MB. This is what makes `--full` usable on a feature.
+- A scan of more than 24 windows prints `window n/total` to stderr while it works, so a
+  long `--full` run does not look like a hang. Nothing is printed when stderr is not a
+  terminal, so pipes and redirects are unaffected.
+
 ## 1.0.0 - 2026-09-21
 
 First release.

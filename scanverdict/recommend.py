@@ -22,6 +22,8 @@ from .classify import (
     TELECINE_3_2,
     UNDETERMINED,
     FileVerdict,
+    FrameBlend,
+    Segment,
 )
 from .probe import Probe
 
@@ -94,12 +96,34 @@ def _quote(path: str) -> str:
     return shlex.quote(path)
 
 
-def _ffmpeg_command(path: str, filters: list[str]) -> str:
-    argv = ["ffmpeg", "-i", _quote(path)]
+def _ffmpeg_command(path: str, filters: list[str], span=None, out=OUTPUT_NAME) -> str:
+    argv = ["ffmpeg"]
+    if span is not None:
+        argv += ["-ss", f"{span[0]:.3f}", "-to", f"{span[1]:.3f}"]
+    argv += ["-i", _quote(path)]
     if filters:
         argv += ["-vf", ",".join(filters)]
-    argv += ENCODER + [OUTPUT_NAME]
+    argv += ENCODER + [out]
     return " ".join(argv)
+
+
+def chain_text(label: str, field_order: str | None) -> str:
+    """The chain for a label as one printable string, including the empty cases."""
+    if label in (UNDETERMINED, MIXED):
+        return "-- (nothing conclusive)"
+    pieces = chain_for(label, field_order)
+    return ",".join(pieces) if pieces else "(no filter)"
+
+
+def segment_command(path: str, segment: Segment, field_order: str | None, index: int) -> str:
+    """The ffmpeg line that extracts one segment and fixes it, numbered out01.mkv on."""
+    stem, ext = os.path.splitext(OUTPUT_NAME)
+    return _ffmpeg_command(
+        path,
+        chain_for(segment.label, field_order),
+        span=(segment.start, segment.end),
+        out=f"{stem}{index:02d}{ext}",
+    )
 
 
 _VS_HEADER = """import vapoursynth as vs
@@ -118,12 +142,36 @@ def _vs_source(path: str, extra_import: str = "") -> str:
     return _VS_HEADER.format(source=quoted, extra=extra)
 
 
-def _vapoursynth(label: str, path: str, field_order: str | None, out_fps: Fraction | None) -> str:
+def _srestore(path: str, order_bit: int, frate: float) -> str:
+    """The one snippet that undoes blending, wherever the blend came from."""
+    return (
+        "# srestore lives in havsfunc 33. Release 34 dropped it, so pin:\n"
+        "#   pip install havsfunc==33\n"
+        f"{_vs_source(path, 'import havsfunc as haf')}\n"
+        f"clip = haf.srestore(clip, frate={frate:.3f})"
+        "  # frate = the rate of the film underneath the blends\n"
+        f"{_VS_FOOTER}\n"
+        "\n"
+        "# Maintained alternative, when field matching leaves 2 blends every 5 frames:\n"
+        "#   from vsdeinterlace import deblend\n"
+        f"#   clip = deblend(core.vivtc.VFM(clip, order={order_bit}))\n"
+    )
+
+
+def _vapoursynth(
+    label: str,
+    path: str,
+    field_order: str | None,
+    out_fps: Fraction | None,
+    blend: FrameBlend | None = None,
+) -> str:
     order_bit = 0 if field_order == "bff" else 1
     order_note = "0 = bottom field first" if order_bit == 0 else "1 = top field first"
     head = _vs_source(path)
 
     if label == PROGRESSIVE:
+        if blend is not None:
+            return _srestore(path, order_bit, blend.source_fps)
         return (
             "# Nothing to run. The frames are already whole; any deinterlacer or\n"
             "# field matcher here would cost you detail and buy you nothing."
@@ -154,18 +202,7 @@ def _vapoursynth(label: str, path: str, field_order: str | None, out_fps: Fracti
             f"{_VS_FOOTER}\n"
         )
     if label == FIELD_BLENDED:
-        return (
-            "# srestore lives in havsfunc 33. Release 34 dropped it, so pin:\n"
-            "#   pip install havsfunc==33\n"
-            f"{_vs_source(path, 'import havsfunc as haf')}\n"
-            "clip = haf.srestore(clip, frate=23.976)"
-            "  # frate = the rate of the film underneath the blends\n"
-            f"{_VS_FOOTER}\n"
-            "\n"
-            "# Maintained alternative, when field matching leaves 2 blends every 5 frames:\n"
-            "#   from vsdeinterlace import deblend\n"
-            f"#   clip = deblend(core.vivtc.VFM(clip, order={order_bit}))\n"
-        )
+        return _srestore(path, order_bit, 23.976)
     return "# No snippet: scanverdict will not guess at a chain it cannot justify."
 
 
@@ -177,7 +214,19 @@ def recommend(verdict: FileVerdict, probe_info: Probe) -> Recommendation:
     out_fps = in_fps * ratio if ratio is not None else None
     caveats: list[str] = []
 
-    if label == PROGRESSIVE:
+    if label == PROGRESSIVE and verdict.frame_blend is not None:
+        blend = verdict.frame_blend
+        summary = (
+            "whole frames, but each one is a mixture of the two around it on a "
+            f"{blend.period}-frame cycle: the rate was changed by blending. No ffmpeg "
+            "deinterlacer touches this. Use srestore, below."
+        )
+        caveats.append(
+            "A blend cannot be fully undone. srestore rebuilds the "
+            f"{blend.source_fps:.1f} fps source where clean frames survive between the "
+            "blends and interpolates where they do not."
+        )
+    elif label == PROGRESSIVE:
         summary = "no filter needed -- the frames are already whole"
     elif label in (INTERLACED_TFF, INTERLACED_BFF):
         side = "top" if label == INTERLACED_TFF else "bottom"
@@ -211,9 +260,9 @@ def recommend(verdict: FileVerdict, probe_info: Probe) -> Recommendation:
         )
     elif label == MIXED:
         summary = (
-            "the file is not one thing: the per-window table above shows which segments "
-            "need which chain. Cut the file on those boundaries and treat each part "
-            "separately, or use VapourSynth and splice."
+            "the file is not one thing: its parts need different chains. Cut it on the "
+            "boundaries listed here and treat each part separately, or do the whole "
+            "thing in VapourSynth and splice."
         )
     else:
         summary = (
@@ -238,7 +287,9 @@ def recommend(verdict: FileVerdict, probe_info: Probe) -> Recommendation:
         label=label,
         filters=filters,
         ffmpeg=_ffmpeg_command(probe_info.path, filters),
-        vapoursynth=_vapoursynth(label, probe_info.path, verdict.field_order, out_fps),
+        vapoursynth=_vapoursynth(
+            label, probe_info.path, verdict.field_order, out_fps, verdict.frame_blend
+        ),
         summary=summary,
         frame_ratio=ratio,
         output_fps=out_fps,
@@ -250,10 +301,8 @@ def segment_chains(verdict: FileVerdict) -> list[tuple[str, str]]:
     """For a mixed file: the distinct labels present and the chain each needs."""
     seen: dict[str, str] = {}
     for window in verdict.windows:
-        if window.label in (UNDETERMINED, MIXED):
-            chain = "-- (nothing conclusive)"
-        else:
-            pieces = chain_for(window.label, window.field_order or verdict.field_order)
-            chain = ",".join(pieces) if pieces else "(no filter)"
-        seen.setdefault(window.label, chain)
+        seen.setdefault(
+            window.label,
+            chain_text(window.label, window.field_order or verdict.field_order),
+        )
     return sorted(seen.items())

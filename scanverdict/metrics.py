@@ -188,6 +188,49 @@ def blend_solve(frames: np.ndarray) -> Blend:
     return Blend(alpha, residual, blended)
 
 
+# A blended frame-rate conversion mixes each output frame from a different pair
+# of source frames, so the three-frame fit above matches well at some phases and
+# badly at others. The cycle length is the number of output frames the
+# conversion repeats over: 25 for 24 -> 25. Measured on four unrelated sources,
+# blended files ripple 0.26 to 0.32 and progressive ones 0.07 to 0.11.
+BLEND_PERIOD_MIN, BLEND_PERIOD_MAX = 8, 40
+BLEND_RIPPLE_MIN = 0.20
+BLEND_PERIOD_AC = 0.50
+_BLEND_PERIOD_SAMPLES = 90
+
+
+@dataclass
+class BlendPeriod:
+    period: int      # output frames per cycle
+    strength: float  # residual autocorrelation at that lag
+    ripple: float    # residual coefficient of variation
+
+
+def blend_period(blend: Blend) -> BlendPeriod | None:
+    """Find a repeating cycle in the blend residual, or None if there is none."""
+    r = blend.residual[np.isfinite(blend.residual)]
+    if len(r) < _BLEND_PERIOD_SAMPLES:
+        return None
+    mean = float(r.mean())
+    if mean <= 0:
+        return None
+    ripple = float(r.std()) / mean
+    if ripple < BLEND_RIPPLE_MIN:
+        return None
+    centred = r - mean
+    energy = float(centred @ centred)
+    if energy <= 0:
+        return None
+    lags = np.arange(BLEND_PERIOD_MIN, BLEND_PERIOD_MAX + 1)
+    scores = np.array([float(centred[: len(r) - k] @ centred[k:]) / energy for k in lags])
+    best = int(scores.argmax())
+    if scores[best] < BLEND_PERIOD_AC:
+        return None
+    return BlendPeriod(
+        period=int(lags[best]), strength=float(scores[best]), ripple=ripple
+    )
+
+
 @dataclass
 class IdetScore:
     """idet's alpha/delta comparison, reimplemented from libavfilter/vf_idet.c."""
@@ -269,6 +312,7 @@ def window_metrics(frames: np.ndarray) -> dict:
     top, bottom = active_rows(frames)
     active = frames[:, top:bottom]
     match = field_match(active)
+    blended = blend_solve(active)
     if len(match.best_kind) >= 2:
         matched_dup = frame_diff(matched_sequence(active, match))
     else:
@@ -282,6 +326,7 @@ def window_metrics(frames: np.ndarray) -> dict:
         # Telecine duplicates only become identical once the fields have been
         # re-paired, so the duplicate `decimate` drops is invisible in raw dup.
         "matched_dup": matched_dup,
-        "blend": blend_solve(active),
+        "blend": blended,
+        "blend_period": blend_period(blended),
         "idet": idet_score(active),
     }

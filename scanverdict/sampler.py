@@ -6,17 +6,19 @@ only geometry change is a centre crop in the horizontal direction.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
 
 import numpy as np
 
-from .ffmpeg import gray_frames, require
+from .ffmpeg import FFmpegFailed, ScanverdictError, gray_frames, require
 from .probe import Probe
 
 MAX_COLUMNS = 512
 _ANALYSIS_SPAN = 0.90   # middle 90% of the duration
 _BLOCK_W = 16
+MIN_WINDOW_FRAMES = 12
+WINDOW_BUDGET = 2 * 1024**3   # bytes held for one decoded window
 
 
 @dataclass(frozen=True)
@@ -46,6 +48,8 @@ class Plan:
     starts: list[float]
     frames_per_window: int
     requested_windows: int
+    window_seconds: float = 0.0
+    contiguous: bool = False   # full scan: windows abut, so runs are segments
     note: str | None = None
 
 
@@ -58,45 +62,68 @@ def crop_for(p: Probe) -> Crop:
     return Crop(width=width, height=p.height, x=x - (x & 1))
 
 
-def plan(p: Probe, windows: int, frames_per_window: int) -> Plan:
-    """Evenly spaced, non-overlapping starts across the middle 90% of the file."""
+def _budget(p: Probe, frames: int) -> None:
+    cost = frames * p.height * crop_for(p).width
+    if cost > WINDOW_BUDGET:
+        raise ScanverdictError(
+            f"{frames} frames of {p.height} lines needs {cost / 1024**3:.1f} GB in memory "
+            f"for one window. Lower --frames-per-window."
+        )
+
+
+def plan(p: Probe, windows: int, frames_per_window: int, full: bool = False) -> Plan:
+    """Where to sample.
+
+    The default spreads non-overlapping windows evenly across the middle 90% of
+    the file. `full` tiles them back to back over the whole of it instead, so
+    consecutive windows with the same verdict are a real segment.
+    """
     fps = p.fps
-    span = p.duration * _ANALYSIS_SPAN
-    lead = p.duration * (1.0 - _ANALYSIS_SPAN) / 2.0
+    span = p.duration if full else p.duration * _ANALYSIS_SPAN
+    lead = 0.0 if full else p.duration * (1.0 - _ANALYSIS_SPAN) / 2.0
 
     frames = frames_per_window
-    note = None
+    notes: list[str] = []
     window_seconds = frames / fps
     if window_seconds > span:
-        frames = max(12, int(span * fps) - 1)
+        frames = max(MIN_WINDOW_FRAMES, int(span * fps) - 1)
         window_seconds = frames / fps
-        note = (
+        notes.append(
             f"file is only {p.duration:.1f}s, so each window holds "
             f"{frames} frames instead of {frames_per_window}"
         )
+    _budget(p, frames)
 
-    fits = max(1, int(span // window_seconds))
-    count = min(windows, fits)
-    if count < windows and note is None:
-        note = (
-            f"file holds only {count} non-overlapping window"
-            f"{'' if count == 1 else 's'} of {frames} frames, not {windows}"
+    if full:
+        # round, not ceil: a runt tail window decodes too few frames to classify
+        # and would only add an undetermined vote.
+        count = max(1, round(span / window_seconds))
+        starts = [i * window_seconds for i in range(count)]
+        notes.append(
+            f"full scan: {count} back-to-back windows of {frames} frames "
+            f"across all {p.duration:.1f}s"
         )
-    elif count < windows:
-        note += f"; and only {count} of them fit, not {windows}"
-
-    if count == 1:
-        starts = [lead + max(0.0, (span - window_seconds) / 2.0)]
     else:
-        usable = max(0.0, span - window_seconds)
-        step = usable / (count - 1)
-        starts = [lead + i * step for i in range(count)]
+        fits = max(1, int(span // window_seconds))
+        count = min(windows, fits)
+        if count < windows:
+            notes.append(
+                f"file holds only {count} non-overlapping window"
+                f"{'' if count == 1 else 's'} of {frames} frames, not {windows}"
+            )
+        if count == 1:
+            starts = [lead + max(0.0, (span - window_seconds) / 2.0)]
+        else:
+            step = max(0.0, span - window_seconds) / (count - 1)
+            starts = [lead + i * step for i in range(count)]
 
     return Plan(
         starts=[round(s, 3) for s in starts],
         frames_per_window=frames,
-        requested_windows=windows,
-        note=note,
+        requested_windows=count if full else windows,
+        window_seconds=window_seconds,
+        contiguous=full,
+        note="; ".join(notes) or None,
     )
 
 
@@ -124,12 +151,19 @@ def decode(
     if frames is not None:
         argv += ["-frames:v", str(frames)]
     argv += ["-f", "rawvideo", "-pix_fmt", "gray", "-"]
-    return gray_frames(argv, height, width)
+    try:
+        return gray_frames(argv, height, width)
+    except FFmpegFailed as exc:
+        raise FFmpegFailed(f"{path}: at {start:.3f}s, {exc}") from exc
 
 
-def sample(p: Probe, layout: Plan) -> list[Window]:
+def sample(p: Probe, layout: Plan) -> Iterator[Window]:
+    """Decode each planned window in turn.
+
+    A generator, not a list: --full can plan thousands of windows on a feature
+    length file, and holding every decoded one would cost tens of gigabytes.
+    """
     crop = crop_for(p)
-    out = []
     for index, start in enumerate(layout.starts):
         frames = decode(
             p.path,
@@ -139,12 +173,9 @@ def sample(p: Probe, layout: Plan) -> list[Window]:
             filters=[crop.filter],
             frames=layout.frames_per_window,
         )
-        out.append(
-            Window(
-                index=index,
-                start=start,
-                start_frame=round(start * p.fps),
-                frames=frames,
-            )
+        yield Window(
+            index=index,
+            start=start,
+            start_frame=round(start * p.fps),
+            frames=frames,
         )
-    return out

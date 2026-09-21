@@ -5,6 +5,9 @@ from __future__ import annotations
 import csv
 import io
 import json
+import subprocess
+import sys
+from pathlib import Path
 
 import pytest
 
@@ -124,3 +127,50 @@ def test_asking_for_more_windows_than_fit_says_so(capsys, fixtures):
     code, out, _ = run(capsys, str(fixtures["telecine.mkv"]), "--no-verify", "--windows", "99")
     assert code == 0
     assert "not 99" in out
+
+
+def test_full_scan_turns_a_mixed_file_into_segments(capsys, fixtures):
+    """mixed.mkv is 20s of telecine spliced to 20s of interlace. Find the seam."""
+    code, out, _ = run(
+        capsys, str(fixtures["mixed.mkv"]), "--full", "--no-verify", "--json"
+    )
+    payload = json.loads(out)
+    assert code == 0
+    assert payload["sampling"]["full"] is True
+    labels = [seg["label"] for seg in payload["segments"]]
+    assert labels == ["telecine_3_2", "interlaced_tff"]
+    seam = payload["segments"][0]["end"]
+    assert seam == pytest.approx(20.0, abs=payload["sampling"]["window_seconds"])
+
+
+def test_full_scan_prints_a_cut_list(capsys, fixtures):
+    code, out, _ = run(capsys, str(fixtures["mixed.mkv"]), "--full", "--no-verify")
+    assert code == 0
+    assert "segments" in out
+    assert "-vf fieldmatch=order=tff,decimate -c:v libx264 out01.mkv" in out
+    assert "-vf bwdif=mode=send_field:parity=tff -c:v libx264 out02.mkv" in out
+
+
+def test_sampling_reports_no_segments(capsys, fixtures):
+    code, out, _ = run(capsys, str(fixtures["mixed.mkv"]), "--json", *FAST)
+    payload = json.loads(out)
+    assert code == 0
+    assert payload["segments"] == []
+    assert any("--full" in note for note in payload["notes"])
+
+
+def test_a_non_latin1_filename_survives_stdout(fixtures, tmp_path):
+    """Windows picks the ANSI code page for stdout, which cannot hold this name.
+
+    Runs out of process on purpose: capsys would substitute its own encoder and
+    hide the very thing being tested.
+    """
+    target = tmp_path / "映画.mkv"
+    target.write_bytes(fixtures["progressive.mkv"].read_bytes())
+    done = subprocess.run(
+        [sys.executable, "-m", "scanverdict", str(target), "--quiet", *FAST],
+        capture_output=True,
+        cwd=Path(__file__).resolve().parent.parent,
+    )
+    assert done.returncode == 0, done.stderr.decode("utf-8", "replace")
+    assert "映画.mkv: progressive" in done.stdout.decode("utf-8")

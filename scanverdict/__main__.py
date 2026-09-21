@@ -5,14 +5,30 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import os
 import sys
 from dataclasses import dataclass
 
 from . import __version__
-from .classify import MIXED, UNDETERMINED, FileVerdict, classify_window, reconcile
+from .classify import (
+    MIXED,
+    UNDETERMINED,
+    FileVerdict,
+    Segment,
+    classify_window,
+    reconcile,
+    segments,
+)
 from .ffmpeg import ScanverdictError, require
 from .probe import Probe, probe
-from .recommend import Recommendation, fps_text, recommend, segment_chains
+from .recommend import (
+    Recommendation,
+    chain_text,
+    fps_text,
+    recommend,
+    segment_chains,
+    segment_command,
+)
 from .sampler import Plan, plan, sample
 from .verify import Verification, apply_to_confidence, verify
 
@@ -28,6 +44,17 @@ class Report:
     rec: Recommendation
     checked: Verification
 
+    @property
+    def segments(self) -> list[Segment]:
+        """Timed spans, or [] when there is nothing to cut on.
+
+        One span covering the whole file says no more than the verdict already does.
+        """
+        if not self.layout.contiguous:
+            return []
+        runs = segments(self.verdict, self.layout.window_seconds, self.info.duration)
+        return runs if len(runs) > 1 else []
+
     def as_dict(self) -> dict:
         v = self.verdict
         return {
@@ -39,6 +66,7 @@ class Report:
             "field_order_assumed": v.field_order_assumed,
             "cadence": v.cadence,
             "phase": v.phase,
+            "frame_blend": None if v.frame_blend is None else v.frame_blend.as_dict(),
             "phase_agreement": v.phase_agreement,
             "agreement": v.agreement,
             "container": {
@@ -53,10 +81,13 @@ class Report:
                 "frames_per_window": self.layout.frames_per_window,
                 "starts": self.layout.starts,
                 "note": self.layout.note,
+                "full": self.layout.contiguous,
+                "window_seconds": round(self.layout.window_seconds, 3),
             },
             "recommendation": self.rec.as_dict(),
             "verification": self.checked.as_dict(),
             "windows": [w.as_dict() for w in v.windows],
+            "segments": [s.as_dict() for s in self.segments],
             "notes": v.notes,
         }
 
@@ -69,6 +100,7 @@ class Report:
             "field_order": v.field_order or "",
             "cadence": v.cadence or "",
             "phase": "" if v.phase is None else v.phase,
+            "blend_period": "" if v.frame_blend is None else v.frame_blend.period,
             "agreement": v.agreement,
             "container": v.container_label,
             "container_agreement": v.container_agreement,
@@ -86,20 +118,41 @@ class Report:
 
 CSV_FIELDS = [
     "file", "verdict", "confidence", "field_order", "cadence", "phase",
-    "agreement", "container", "container_agreement", "fps_in", "fps_out",
+    "blend_period", "agreement", "container", "container_agreement", "fps_in", "fps_out",
     "filters", "comb_before", "comb_after", "reduction", "frames_before",
     "frames_after", "verified",
 ]
 
 
+PROGRESS_FROM = 24   # windows, above which a silent scan looks like a hang
+
+
+def _progress(done: int, total: int) -> None:
+    if total < PROGRESS_FROM or not sys.stderr.isatty():
+        return
+    print(
+        f"\r  window {done}/{total}",
+        end="\n" if done == total else "",
+        file=sys.stderr,
+        flush=True,
+    )
+
+
 def analyse(path: str, args: argparse.Namespace) -> Report:
     info = probe(path)
-    layout = plan(info, args.windows, args.frames_per_window)
-    windows = sample(info, layout)
-    verdicts = [classify_window(w, info) for w in windows]
+    layout = plan(info, args.windows, args.frames_per_window, full=args.full)
+    verdicts = []
+    for window in sample(info, layout):
+        verdicts.append(classify_window(window, info))
+        _progress(len(verdicts), len(layout.starts))
     verdict = reconcile(verdicts, info)
     if layout.note:
         verdict.notes.insert(0, layout.note)
+    if verdict.label == MIXED and not layout.contiguous:
+        verdict.notes.append(
+            "run it again with --full to turn these windows into timed segments "
+            "and a cut list"
+        )
 
     rec = recommend(verdict, info)
     if args.no_verify:
@@ -128,14 +181,18 @@ def render(report: Report, out) -> None:
     if v.field_order:
         suffix = " (assumed, not measured)" if v.field_order_assumed else ""
         w(f"field order: {v.field_order}{suffix}\n")
-    w(f"sampled: {len(report.layout.starts)} windows of "
+    how = "scanned" if report.layout.contiguous else "sampled"
+    w(f"{how}: {len(report.layout.starts)} windows of "
       f"{report.layout.frames_per_window} frames, {v.agreement} agree\n")
 
     w("\nevidence\n")
     for line in _evidence_lines(report):
         w(f"  {line}\n")
 
-    if v.label in (MIXED, UNDETERMINED) or any(win.label != v.label for win in v.windows):
+    runs = report.segments
+    if not runs and (
+        v.label in (MIXED, UNDETERMINED) or any(win.label != v.label for win in v.windows)
+    ):
         w("\nper window\n")
         for line in _window_table(report):
             w(f"  {line}\n")
@@ -143,7 +200,15 @@ def render(report: Report, out) -> None:
     w(f"\n{rec.summary}\n")
     if rec.filters:
         w(f"\n{rec.ffmpeg}\n")
-    if v.label == MIXED:
+    if runs:
+        w("\nsegments\n")
+        for line in _segment_table(report, runs):
+            w(f"  {line}\n")
+        if len({seg.label for seg in runs}) > 1:
+            w("\ncut there and run each part through its own chain:\n")
+            for i, seg in enumerate(runs, 1):
+                w(f"  {segment_command(info.path, seg, v.field_order, i)}\n")
+    elif v.label == MIXED:
         w("\nsegments need different chains:\n")
         for label, chain in segment_chains(v):
             w(f"  {label:<16} {chain}\n")
@@ -174,10 +239,16 @@ def _evidence_lines(report: Report) -> list[str]:
         f"{avg('clean_share'):.0%} of frames clean",
         f"field matches    {avg('match_c_share'):.0%} keep the frame as shot "
         f"(example: {windows[0].evidence['match_string'][:30]})",
-        f"blend solve      fires on {avg('blend_rate'):.0%} of frames",
+        f"blend per frame  fires on {avg('blend_rate'):.0%} of frames",
         f"motion           {avg('motion'):.1f} gray levels between frames (p90)",
         f"idet             {', '.join(sorted({win.evidence['idet'] for win in windows}))}",
     ]
+    blend = report.verdict.frame_blend
+    if blend is not None:
+        lines.append(
+            f"blend cycle      repeats every {blend.period} frames, so the source ran "
+            f"at about {blend.source_fps:.1f} fps"
+        )
     crop = windows[0].evidence["crop_rows"]
     if crop[0] or crop[1] != report.info.height:
         lines.append(
@@ -194,9 +265,23 @@ def _window_table(report: Report) -> list[str]:
     return rows
 
 
+def _segment_table(report: Report, runs: list[Segment]) -> list[str]:
+    rows = ["start      end       verdict          chain"]
+    for seg in runs:
+        chain = chain_text(seg.label, report.verdict.field_order)
+        rows.append(f"{seg.start:>8.1f}  {seg.end:>8.1f}  {seg.label:<16} {chain}")
+    rows.append(
+        "(boundaries land on a window edge, so they are good to "
+        f"{report.layout.window_seconds:.1f}s)"
+    )
+    return rows
+
+
 def _quiet_line(report: Report) -> str:
     v = report.verdict
     extra = f" cadence {v.cadence} phase {v.phase}" if v.cadence else ""
+    if v.frame_blend is not None:
+        extra += f" frame-blended on a {v.frame_blend.period}-frame cycle"
     return f"{report.info.path}: {v.label} ({v.confidence}){extra}"
 
 
@@ -223,18 +308,45 @@ def build_parser() -> argparse.ArgumentParser:
         "--frames-per-window", type=int, default=DEFAULT_FRAMES, metavar="N",
         help=f"frames decoded per span (default {DEFAULT_FRAMES})",
     )
+    p.add_argument(
+        "--full", action="store_true",
+        help="scan the whole file in back-to-back windows instead of sampling, "
+             "which turns a mixed verdict into timed segments (--windows is ignored)",
+    )
     p.add_argument("--no-verify", action="store_true", help="skip the proving pass")
     p.add_argument("--quiet", action="store_true", help="one line per file")
     p.add_argument("--version", action="version", version=f"scanverdict {__version__}")
     return p
 
 
+def _utf8_output() -> None:
+    """Stop a non-Latin-1 filename from killing the run on a Windows console.
+
+    Python picks the ANSI code page for stdout on Windows, so a Japanese title
+    raises UnicodeEncodeError halfway through printing a verdict.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is None:
+            continue
+        try:
+            reconfigure(encoding="utf-8", errors="backslashreplace")
+        except (ValueError, OSError):
+            pass
+
+
 def main(argv: list[str] | None = None) -> int:
+    _utf8_output()
     try:
         return _run(argv)
     except KeyboardInterrupt:
         print("scanverdict: interrupted", file=sys.stderr)
         return 130
+    except BrokenPipeError:
+        # `scanverdict ... | head` closes the pipe under us. Retiring the fd
+        # keeps the interpreter from reporting the same failure again at exit.
+        os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())
+        return 141
 
 
 def _run(argv: list[str] | None) -> int:
